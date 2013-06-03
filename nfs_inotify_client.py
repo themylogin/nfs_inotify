@@ -50,6 +50,6 @@ if __name__ == "__main__":
         to_touch = os.path.join(args.local_path, socket_readline(s))
         try:
             touch(to_touch)
-        except OSError, e:
+        except Exception, e:
             logger.exception(e)
             pass
