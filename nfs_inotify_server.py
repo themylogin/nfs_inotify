@@ -3,21 +3,18 @@ import logging
 import os
 import pyinotify
 from Queue import Queue
-import socket
 import SocketServer
 import sys
 import threading
 
 logger = logging.getLogger("nfs_inotify_server")
-logger.setLevel(logging.DEBUG)
-handler = logging.FileHandler(__file__.replace(".py", ".%s.log" % socket.gethostname()))
-handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-logger.addHandler(handler)
 
 class TouchProducer(object):
-    def __init__(self, root_full_path, handler):
+    def __init__(self, root_full_path, file_handler, directory_handler):
         self.root_full_path = root_full_path
-        self.handler = handler
+
+        self.file_handler = file_handler
+        self.directory_handler = directory_handler
 
         self.watch_manager = pyinotify.WatchManager()
         self.notifier = pyinotify.Notifier(self.watch_manager, self.handle_event)
@@ -31,16 +28,22 @@ class TouchProducer(object):
                 self.notifier.read_events()
 
     def add_watch(self, full_path):
-        logger.debug("add_watch: %s", full_path)
-
-        self.watch_manager.add_watch(full_path,
-            pyinotify.IN_CREATE |
-            pyinotify.IN_DELETE |
-            pyinotify.IN_MOVED_FROM |
-            pyinotify.IN_MOVED_TO | 
-            pyinotify.IN_CLOSE_WRITE |
-            0
-        )
+        if os.path.isdir(full_path):
+            logger.debug("Add watch (directory): %s", full_path)
+            self.watch_manager.add_watch(full_path,
+                pyinotify.IN_CREATE |
+                pyinotify.IN_DELETE |
+                pyinotify.IN_MOVED_FROM |
+                pyinotify.IN_MOVED_TO | 
+                0
+            )
+        else:
+            logger.debug("Add watch (file): %s", full_path)
+            self.watch_manager.add_watch(full_path,                
+                pyinotify.IN_MODIFY |
+                pyinotify.IN_CLOSE_WRITE |
+                0
+            )
 
     def add_watch_recursive(self, full_path):
         self.add_watch(full_path)
@@ -49,35 +52,57 @@ class TouchProducer(object):
                 self.add_watch_recursive(os.path.join(full_path, i))
 
     def handle_event(self, event):
-        logger.debug("received event: %s", event)
+        logger.debug("Received event: %s", event)
 
-        if event.pathname.endswith(".nfs_inotify_client_dummy"):
+        if event.mask & (pyinotify.IN_IGNORED):
+            logger.debug("Ignoring this event")
             return
 
-        full_path = self.what_to_touch(event)
-        if full_path is not None:
-            self.handler(os.path.relpath(full_path, self.root_full_path))
+        if not self.is_own_event(event):
+            self.produce_touches(event)
+            self.add_new_watches(event)
 
-        self.add_new_watches(event)
+    def is_own_event(self, event):
+        if os.path.basename(event.pathname).endswith(".nfs_inotify"):
+            logger.debug("It is event regarding *.nfs_inotify file")
+            return True
 
-    def what_to_touch(self, event):
-        if event.maskname == pyinotify.IN_CLOSE_WRITE:
-            return event.pathname
+        if event.mask & (pyinotify.IN_CLOSE_WRITE):
+            directory, filename = os.path.split(event.pathname)
+            ignore_filename = os.path.join(directory, filename + ".ignore_IN_CLOSE_WRITE.nfs_inotify")
+            if os.path.exists(ignore_filename):
+                logger.debug("It is IN_CLOSE_WRITE event, but *.ignore_IN_CLOSE_WRITE.nfs_inotify file exists")
+                return True
+
+        return False
+
+    def produce_touches(self, event):        
+        if event.mask & (pyinotify.IN_MODIFY | pyinotify.IN_CLOSE_WRITE):
+            path = os.path.relpath(event.pathname, self.root_full_path)
+            logger.info("Touch file: %s", path)
+            self.file_handler(path)
         else:
-            return event.path
+            path = os.path.relpath(event.path, self.root_full_path)
+            logger.info("Touch directory: %s", path)
+            self.directory_handler(path)
 
     def add_new_watches(self, event):
         if event.mask & (pyinotify.IN_CREATE | pyinotify.IN_MOVED_TO):
             self.add_watch_recursive(event.pathname)
 
-def create_touch_producer_event_handler(queues_list):
-    def touch_producer_event_handler(path):
-        logger.debug("touch %s", path)
+class TouchProducerEventHandler(object):
+    def __init__(self, queues):
+        self.queues = queues
 
-        for queue in queues_list:
-            queue.put(path)
+    def file_handler(self, filename):
+        self.queues_put("file %s" % filename)
 
-    return touch_producer_event_handler
+    def directory_handler(self, filename):
+        self.queues_put("directory %s" % filename)
+
+    def queues_put(self, command):
+        for queue in self.queues:
+            queue.put(command)
 
 class TouchEventsRequestHandler(SocketServer.StreamRequestHandler, object):
     def __init__(self, queues, *args, **kwargs):
@@ -86,6 +111,8 @@ class TouchEventsRequestHandler(SocketServer.StreamRequestHandler, object):
 
     def handle(self):
         path = self.rfile.readline().strip()
+        logger.debug("Connected client watching %s", path)
+
         if path not in self.queues:
             return
 
@@ -109,13 +136,20 @@ if __name__ == "__main__":
     parser.add_argument("addr", action="store")
     parser.add_argument("port", action="store", type=int)
     parser.add_argument("path", action="append", nargs="+")
+    parser.add_argument("--log-file", action="store", type=argparse.FileType("w"), default=sys.stderr)
+    parser.add_argument("--log-level", action="store", type=lambda level: getattr(logging, level), default="DEBUG", choices=["DEBUG", "INFO", "WARNING", "ERROR", "FATAL"])
     args = parser.parse_args(sys.argv[1:])
+
+    logging.basicConfig(stream=args.log_file, level=args.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%b %d %H:%M:%S")
 
     queues = {}
     for path in args.path[0]:
         queues[path] = []
-        producer_thread = threading.Thread(target=TouchProducer(path, create_touch_producer_event_handler(queues[path])).process)
+        event_handler = TouchProducerEventHandler(queues[path])
+        touch_producer = TouchProducer(path, event_handler.file_handler, event_handler.directory_handler)
+        producer_thread = threading.Thread(target=touch_producer.process)
         producer_thread.daemon = True
         producer_thread.start()
 
-    ThreadedTCPServer((args.addr, args.port), TouchEventsRequestHandlerFactory(queues)).serve_forever()
+    tcp_server = ThreadedTCPServer((args.addr, args.port), TouchEventsRequestHandlerFactory(queues))
+    tcp_server.serve_forever()

@@ -5,10 +5,6 @@ import socket
 import sys
 
 logger = logging.getLogger("nfs_inotify_client")
-logger.setLevel(logging.DEBUG)
-handler = logging.FileHandler(__file__.replace(".py", ".%s.log" % socket.gethostname()))
-handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-logger.addHandler(handler)
 
 def socket_readline(s):
     ret = ""
@@ -22,18 +18,32 @@ def socket_readline(s):
 
     return ret
 
-def touch(to_touch):
-    if os.path.isdir(to_touch):
-        dummy = os.path.join(to_touch, ".nfs_inotify_client_dummy")
+def touch_file(filename):
+    try:
+        ignore_filename = filename + ".ignore_IN_CLOSE_WRITE.nfs_inotify"
+        
+        logger.debug("Creating ignore file: %s", ignore_filename)
+        open(ignore_filename, "w").close()
 
-        logger.debug("create %s", dummy)
-        open(dummy, "w").close()
+        logger.debug("Performing touch: %s", filename)
+        os.utime(filename, None)
 
-        logger.debug("unlink %s", dummy)
-        os.unlink(dummy)
-    else:
-        logger.debug("touch %s", to_touch)
-        os.utime(to_touch, None)
+        logger.debug("Removing ignore file: %s", ignore_filename)
+        os.unlink(ignore_filename)
+    except Exception as e:
+        logger.exception("Error touching %s", filename)
+
+def touch_directory(path):
+    try:
+        dummy_filename = os.path.join(path, ".dummy.nfs_inotify")
+
+        logger.debug("Creating dummy file: %s", dummy_filename)
+        open(dummy_filename, "w").close()
+
+        logger.debug("Removing dummy file: %s", dummy_filename)
+        os.unlink(dummy_filename)
+    except Exception as e:
+        logger.exception("Error touching %s", path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="NFS inotify client")
@@ -41,15 +51,24 @@ if __name__ == "__main__":
     parser.add_argument("port", action="store", type=int)
     parser.add_argument("remote_path", action="store")
     parser.add_argument("local_path", action="store")
+    parser.add_argument("--log-file", action="store", type=argparse.FileType("w"), default=sys.stderr)
+    parser.add_argument("--log-level", action="store", type=lambda level: getattr(logging, level), default="DEBUG", choices=["DEBUG", "INFO", "WARNING", "ERROR", "FATAL"])
     args = parser.parse_args(sys.argv[1:])
+
+    logging.basicConfig(stream=args.log_file, level=args.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%b %d %H:%M:%S")
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.connect((args.addr, args.port))
     s.send("%s\n" % args.remote_path)
     while True:
-        to_touch = os.path.join(args.local_path, socket_readline(s))
-        try:
-            touch(to_touch)
-        except Exception, e:
-            logger.exception(e)
-            pass
+        event_type, relative_path = socket_readline(s).split(" ", 1)
+        absolute_path = os.path.join(args.local_path, relative_path)
+
+        if event_type == "file":
+            logger.debug("Touch file: %s", absolute_path)
+            touch_file(absolute_path)
+        elif event_type == "directory":
+            logger.debug("Touch directory: %s", absolute_path)
+            touch_directory(absolute_path)
+        else:
+            logger.warning("Unknown event type received: %s", event_type)
