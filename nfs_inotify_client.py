@@ -26,7 +26,10 @@ def touch_file(filename):
         open(ignore_filename, "w").close()
 
         logger.debug("Performing touch: %s", filename)
-        os.utime(filename, None)
+        try:
+            os.utime(filename, None)
+        except Exception as e:
+            logger.exception("Error performing touch %s", filename)
 
         logger.debug("Removing ignore file: %s", ignore_filename)
         os.unlink(ignore_filename)
