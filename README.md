@@ -12,6 +12,14 @@ This software consists from server (one instance ran on NFS server) and client (
 
 In this example two directories are being inotified on my media PC: music one and torrent downloads (movies).
 
+### Usage tips
+
+Put
+
+    fs.inotify.max_user_watches=262144
+
+to `/etc/sysctl.conf`
+
 ### Upstart .conf's
 /etc/init/nfs_inotify_server.conf
 
