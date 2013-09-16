@@ -3,6 +3,8 @@ import logging
 import os
 import socket
 import sys
+import threading
+import time
 
 logger = logging.getLogger("nfs_inotify_client")
 
@@ -17,6 +19,26 @@ def socket_readline(s):
             ret += c
 
     return ret
+
+tasks = []
+tasks_lock = threading.Lock()
+last_task_inserted_at = [None]
+def schedule_task(task, *args, **kwargs):
+    tasks_lock.acquire()
+    tasks.append(lambda: task(*args, **kwargs))
+    tasks_lock.release()
+
+    last_task_inserted_at[0] = time.time()
+
+def execute_tasks():
+    while True:
+        if tasks and time.time() - last_task_inserted_at[0] >= 10:
+            tasks_lock.acquire()
+            map(lambda task: task(), tasks)
+            tasks[:] = []
+            tasks_lock.release()
+
+        time.sleep(1)
 
 def touch_file(filename):
     try:
@@ -62,6 +84,10 @@ if __name__ == "__main__":
 
     logging.basicConfig(stream=args.log_file, level=args.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s", datefmt="%b %d %H:%M:%S")
 
+    execute_tasks_thread = threading.Thread(target=execute_tasks)
+    execute_tasks_thread.daemon = True
+    execute_tasks_thread.start()
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.connect((args.addr, args.port))
     s.send("%s\n" % args.remote_path)
@@ -70,10 +96,10 @@ if __name__ == "__main__":
         absolute_path = os.path.join(args.local_path, relative_path)
 
         if event_type == "file":
-            logger.debug("Touch file: %s", absolute_path)
-            touch_file(absolute_path)
+            logger.debug("Schedule touch file: %s", absolute_path)
+            schedule_task(touch_file, absolute_path)
         elif event_type == "directory":
-            logger.debug("Touch directory: %s", absolute_path)
-            touch_directory(absolute_path)
+            logger.debug("Schedule touch directory: %s", absolute_path)
+            schedule_task(touch_directory, absolute_path)
         else:
             logger.warning("Unknown event type received: %s", event_type)
