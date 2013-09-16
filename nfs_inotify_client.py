@@ -25,11 +25,13 @@ def touch_file(filename):
         logger.debug("Creating ignore file: %s", ignore_filename)
         open(ignore_filename, "w").close()
 
-        logger.debug("Performing touch: %s", filename)
+        logger.debug("Performing IN_CLOSE_WRITE: %s", filename)
         try:
-            os.utime(filename, None)
+            if os.path.exists(filename):
+                with open(filename, "a") as f:
+                    pass
         except Exception as e:
-            logger.exception("Error performing touch %s", filename)
+            logger.exception("Error performing IN_CLOSE_WRITE %s", filename)
 
         logger.debug("Removing ignore file: %s", ignore_filename)
         os.unlink(ignore_filename)
